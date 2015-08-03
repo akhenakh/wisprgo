@@ -10,7 +10,6 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -23,18 +22,47 @@ type ProxyRedirection struct {
 	regexps  []*regexp.Regexp
 }
 
-var askWisprHTML = `<html><body><!-- <?xml version="1.0" encoding="UTF-8"?> <WISPAccessGatewayParam xmlns:xsi="http://www.w3.org/2001/
-XMLSchema-instance" xsi:noNamespaceSchemaLocation="WISPAccessGatewayParam.xsd"> <Redirect> <MessageType>100</MessageType> <ResponseCode>0<
-/ResponseCode> <AccessProcedure>1.0</AccessProcedure> <LocationName>Quebec Open Access</LocationName> <ReplyMessage>Welcome</ReplyMessage>
- <AccessLocation>BackEnd Remote Login</AccessLocation> <LoginURL>http://login.wifi/</LoginURL> <AbortLoginURL>http://fail.wifi</AbortLo
-ginURL> </Redirect> </WISPAccessGatewayParam> --></body></html>`
+var askWisprHTML = `<html>
+<head>
+	<meta http-equiv="Cache-control" content="no-cache">
+	<meta http-equiv="Pragma" content="no-cache">
+</head>
+<body>
+<!-- 
+<?xml version="1.0" encoding="UTF-8"?> 
+<WISPAccessGatewayParam xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="WISPAccessGatewayParam.xsd"> 
+<Redirect> 
+  <MessageType>100</MessageType> 
+  <ResponseCode>0</ResponseCode> 
+  <AccessProcedure>1.0</AccessProcedure> 
+  <LocationName>Wifi Open Access</LocationName> 
+  <ReplyMessage>Welcome to this Free Hospot</ReplyMessage>
+   <AccessLocation>BackEnd Remote Login</AccessLocation> 
+   <LoginURL>http://login.wifi/</LoginURL> 
+   <AbortLoginURL>http://fail.wifi</AbortLoginURL> 
+ </Redirect> 
+ </WISPAccessGatewayParam> 
+ --></body></html>`
 
-var okWispHTML = `<html><body><!-- <?xml version="1.0" encoding="UTF-8"?> <WISPAccessGatewayParam xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:
-noNamespaceSchemaLocation="WISPAccessGatewayParam.xsd"> <AuthenticationReply> <MessageType>120</MessageType> <ResponseCode>50</ResponseCod
-e> <AccessProcedure>1.0</AccessProcedure> <ReplyMessage>Authentication Success</ReplyMessage> <LogoffURL>http://home.wifi/</LogoffURL> </
-AuthenticationReply> </WISPAccessGatewayParam> --></body></html>`
+var successHTML = `<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+<HEAD>
+	<TITLE>Success</TITLE>
+</HEAD>
+<BODY>
+Success
+</BODY>
+</HTML>`
 
-var noaccessHTML = `<html><body>You don't have access <a href="http://login.wifi?key=%s">please login here</a></body></html>`
+var noaccessHTML = `<html>
+<body>You don't have access
+<form action="http://auth.wifi/" method="POST">
+            <input type="hidden" name="key" value="%s">
+            <input type="hidden" name="button" value="Login">
+            <input type="submit">
+</form>
+</body>
+</html>`
 
 func NewProxyRedirection(h string, regexps ...string) *ProxyRedirection {
 	p := &ProxyRedirection{
@@ -99,6 +127,8 @@ func (w *WisprProxy) genKeyForHost(host string) string {
 
 func (w *WisprProxy) RoundTrip(r *http.Request) (*http.Response, error) {
 	from := r.Header.Get("X-Forwarded-For")
+	from = strings.Split(from, ",")[0]
+	log.Println("received", r.URL.String(), "from", from)
 	h := make(http.Header)
 	h["Content-Type"] = []string{"text/html"}
 
@@ -108,30 +138,28 @@ func (w *WisprProxy) RoundTrip(r *http.Request) (*http.Response, error) {
 		StatusCode: http.StatusOK,
 	}
 
+	sha := w.genKeyForHost(from)
+
 	// checking against apple known hosts
 	if _, ok := w.appleRules.Match(r.Host); ok {
 		// check for the User Agent
 		if strings.HasPrefix(r.Header.Get("User-Agent"), "CaptiveNetworkSupport") {
 			// it's a match
 			if w.IsAllowed(from) {
-				res.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(okWispHTML)))
-				log.Println("Wispr request sent to", from)
+				res.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(successHTML)))
+				log.Println("Wispr allowed sent to", from)
 			} else {
 				res.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(askWisprHTML)))
-				log.Println("Wispr ok sent to", from)
+				log.Println("Wispr request sent to", from)
 			}
 			return res, nil
 		}
 	}
-	if w.IsAllowed(from) {
-		return http.DefaultTransport.RoundTrip(r)
-	}
 
-	sha := w.genKeyForHost(from)
 	// User GET the login page check for the key
-	if r.Host == "login.wifi" {
-		log.Println(r.URL.Query().Get("key"))
-		if r.URL.Query().Get("key") == sha {
+	if r.Host == "auth.wifi" {
+		log.Println(r.FormValue("key"))
+		if r.FormValue("key") == sha {
 			w.Allow(from)
 			log.Println("allowed", from)
 			res.StatusCode = http.StatusFound
@@ -142,7 +170,29 @@ func (w *WisprProxy) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
-	html := fmt.Sprintf(noaccessHTML, url.QueryEscape(sha))
+	if r.Host == "home.wifi" && w.IsAllowed(from) {
+		homeBody := bytes.NewBuffer([]byte(`<html><body>
+			<!-- 
+<?xml version="1.0" encoding="UTF-8"?> 
+<WISPAccessGatewayParam xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.acmewisp.com/WISPAccessGatewayParam.xsd"> 
+  <AuthenticationReply> 
+	<MessageType>140</MessageType> 
+	<ResponseCode>50</ResponseCode>
+	<LogoffURL>http://home.wifi/</LogoffURL>
+  </AuthenticationReply>
+</WISPAccessGatewayParam>
+-->
+
+			<h1>HOME</h1></body></html>`))
+		res.Body = ioutil.NopCloser(homeBody)
+		return res, nil
+	}
+
+	if w.IsAllowed(from) {
+		return http.DefaultTransport.RoundTrip(r)
+	}
+
+	html := fmt.Sprintf(noaccessHTML, sha)
 	res.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(html)))
 	return res, nil
 }
@@ -193,5 +243,5 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		wproxy.ServeHTTP(w, r)
 	})
-	log.Fatal(http.ListenAndServe(":8181", nil))
+	log.Fatal(http.ListenAndServe(":80", nil))
 }
