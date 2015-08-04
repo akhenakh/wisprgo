@@ -10,6 +10,7 @@ import (
 func main() {
 	wproxy := wisprgo.NewWisprProxy()
 	wproxy.AddReverseProxyRule("www.google.com", `(?i)yahoo\.com/.*`)
+	wproxy.AddFileServer("/tmp", "home.wifi")
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		wproxy.ServeHTTP(w, r)

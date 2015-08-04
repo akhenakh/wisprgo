@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"regexp"
@@ -17,10 +18,11 @@ import (
 )
 
 type WisprProxy struct {
-	rules      []*reverseProxyRule
-	appleRules *reverseProxyRule
-	hosts      map[string]time.Time
-	pKey       []byte
+	rules       []*reverseProxyRule
+	serverRules []*serverRule
+	appleRules  *reverseProxyRule
+	hosts       map[string]time.Time
+	pKey        []byte
 	sync.RWMutex
 }
 
@@ -99,8 +101,8 @@ func (w *WisprProxy) genKeyForHost(host string) string {
 }
 
 func (w *WisprProxy) RoundTrip(r *http.Request) (*http.Response, error) {
-	from := r.Header.Get("X-Forwarded-For")
-	from = strings.Split(from, ",")[0]
+	from, _, _ := net.SplitHostPort(r.RemoteAddr)
+
 	log.Println("received", r.URL.String(), "from", from)
 	h := make(http.Header)
 	h["Content-Type"] = []string{"text/html"}
@@ -131,8 +133,7 @@ func (w *WisprProxy) RoundTrip(r *http.Request) (*http.Response, error) {
 
 	// User GET the login page check for the key
 	if r.Host == "auth.wifi" {
-		log.Println(r.FormValue("key"))
-		if r.FormValue("key") == sha {
+		if r.FormValue("key") != sha {
 			w.Allow(from)
 			log.Println("allowed", from)
 			res.StatusCode = http.StatusFound
@@ -152,13 +153,6 @@ func (w *WisprProxy) RoundTrip(r *http.Request) (*http.Response, error) {
 			res.Body = ioutil.NopCloser(redirectBody)
 			return res, nil
 		}
-	}
-
-	if r.Host == "home.wifi" && w.IsAllowed(from) {
-		homeBody := bytes.NewBuffer([]byte(`<html><body>
-<h1>HOME</h1></body></html>`))
-		res.Body = ioutil.NopCloser(homeBody)
-		return res, nil
 	}
 
 	if w.IsAllowed(from) {
@@ -207,7 +201,34 @@ func (w *WisprProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		Director:  director,
 		Transport: w,
 	}
+	from, _, _ := net.SplitHostPort(r.RemoteAddr)
+	log.Println("ici from", from)
+	if w.IsAllowed(from) {
+		log.Println("ici allowed from", from)
+		for _, handler := range w.serverRules {
+			if handler.hostname == r.Host {
+				log.Println("ici testing  r.Host", r.Host)
+				handler.handler.ServeHTTP(rw, r)
+				return
+			}
+		}
+	}
+
 	proxy.ServeHTTP(rw, r)
+}
+
+func (w *WisprProxy) AddFileServer(path, hostname string) {
+	fs := &serverRule{
+		hostname: hostname,
+		handler:  http.FileServer(http.Dir(path)),
+	}
+	w.serverRules = append(w.serverRules, fs)
+}
+
+// fileServerRule
+type serverRule struct {
+	hostname string
+	handler  http.Handler
 }
 
 func (w *WisprProxy) AddReverseProxyRule(h string, regexps ...string) {
