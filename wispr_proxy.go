@@ -18,11 +18,12 @@ import (
 )
 
 type WisprProxy struct {
-	rules       []*reverseProxyRule
-	serverRules []*serverRule
-	appleRules  *reverseProxyRule
-	hosts       map[string]time.Time
-	pKey        []byte
+	rules        []*reverseProxyRule
+	serverRules  []*serverRule
+	appleRules   *reverseProxyRule
+	androidRules *reverseProxyRule
+	hosts        map[string]time.Time
+	pKey         []byte
 	sync.RWMutex
 }
 
@@ -88,6 +89,8 @@ func NewWisprProxy() *WisprProxy {
 			`www\.airport\.us`,
 			`www\.thinkdifferent\.us`,
 		),
+		// warning android rules are url based
+		androidRules: newReverseProxyRule("android", `connectivitycheck\.android\.com/generate_204`, `www\.google\.com/blank\.html`, `gstatic\.com/generate_204`),
 	}
 	return w
 }
@@ -122,23 +125,39 @@ func (w *WisprProxy) RoundTrip(r *http.Request) (*http.Response, error) {
 			// it's a match
 			if w.IsAllowed(from) {
 				res.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(successHTML)))
-				log.Println("Wispr allowed sent to", from)
+				log.Println("Wispr apple allowed sent to", from)
 			} else {
 				res.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(askWisprHTML)))
-				log.Println("Wispr request sent to", from)
+				log.Println("Wispr apple request sent to", from)
 			}
 			return res, nil
 		}
 	}
 
+	// checking against android known hosts
+	if _, ok := w.androidRules.Match(r.URL.String()); ok {
+		// it's a match
+		if w.IsAllowed(from) {
+			res.StatusCode = 204
+			res.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(successHTML)))
+			log.Println("Wispr android allowed sent to", from)
+		} else {
+			res.StatusCode = http.StatusFound
+			res.Header.Set("Location", "http://login.wifi")
+			res.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(askWisprHTML)))
+			log.Println("Wispr android request sent to", from)
+		}
+		return res, nil
+	}
+
 	// User GET the login page check for the key
 	if r.Host == "auth.wifi" {
-		if r.FormValue("key") != sha {
+		if r.FormValue("key") == sha {
 			w.Allow(from)
 			log.Println("allowed", from)
 			res.StatusCode = http.StatusFound
 			res.Header.Set("Location", "http://home.wifi")
-			redirectBody := bytes.NewBuffer([]byte(`<html><body>
+			redirectOKBody := bytes.NewBuffer([]byte(`<html><body>
 <!-- 
 <?xml version="1.0" encoding="UTF-8"?> 
 <WISPAccessGatewayParam xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.acmewisp.com/WISPAccessGatewayParam.xsd"> 
@@ -150,7 +169,7 @@ func (w *WisprProxy) RoundTrip(r *http.Request) (*http.Response, error) {
 </WISPAccessGatewayParam>
 -->
 				Redirected to <a href="http://home.wifi">Home</a></body></html>`))
-			res.Body = ioutil.NopCloser(redirectBody)
+			res.Body = ioutil.NopCloser(redirectOKBody)
 			return res, nil
 		}
 	}
@@ -202,12 +221,9 @@ func (w *WisprProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		Transport: w,
 	}
 	from, _, _ := net.SplitHostPort(r.RemoteAddr)
-	log.Println("ici from", from)
 	if w.IsAllowed(from) {
-		log.Println("ici allowed from", from)
 		for _, handler := range w.serverRules {
 			if handler.hostname == r.Host {
-				log.Println("ici testing  r.Host", r.Host)
 				handler.handler.ServeHTTP(rw, r)
 				return
 			}
