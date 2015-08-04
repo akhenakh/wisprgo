@@ -36,5 +36,5 @@ For `wisprproxy` to work you have to redirect all traffic through it.
 No need for NAT nor routing just set up a dnsmasq with a wildcard domain:  
 `address=/#/10.4.0.1`
 
-An example configuration is explained on [this blog post](http://blog.nobugware.com/internet_access_power_outage_disaster_free).
+An example configuration is explained on [this blog post](http://blog.nobugware.com/post/2015/internet_access_power_outage_disaster_free/).
 
